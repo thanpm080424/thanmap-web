@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thanmap - Quản Lý Shop Trên Bản Đồ</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tesseract JS cho AI đọc ảnh -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        #map { height: 100vh; width: 100%; z-index: 1; }
+        .sidebar { height: 100vh; overflow-y: auto; z-index: 10; }
+    </style>
+</head>
+<body class="flex bg-gray-100 overflow-hidden">
+    <!-- Sidebar -->
+    <div class="w-96 bg-white shadow-xl flex flex-col sidebar border-r">
+        <div class="p-4 bg-blue-700 text-white font-bold text-2xl shadow">Thanmap</div>
+        <div class="p-4 border-b bg-gray-50">
+            <input type="text" id="searchInput" placeholder="🔍 Tìm kiếm shop hoặc ghi chú..." class="w-full p-2 border rounded-lg shadow-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <label class="block w-full bg-green-600 hover:bg-green-700 text-white text-center p-3 rounded-lg cursor-pointer font-semibold shadow transition-colors">
+                + Phân Tích Ảnh Bằng AI (Tự Động)
+                <input type="file" id="imageInput" class="hidden" accept="image/*">
+            </label>
+            <div id="aiStatus" class="text-sm font-medium text-blue-600 mt-2 hidden text-center">🤖 AI đang phân tích tọa độ, chờ xíu...</div>
+            <div class="mt-2 text-xs text-gray-500 text-center">Mẹo: Click đúp lên bản đồ để thêm thủ công</div>
+        </div>
+        <div id="shopList" class="flex-1 overflow-y-auto p-4 space-y-3">
+            <!-- Danh sách shop sẽ render ở đây -->
+        </div>
+    </div>
+
+    <!-- Map Container -->
+    <div class="flex-1 relative">
+        <div id="map"></div>
+    </div>
+
+    <!-- Edit/Add Modal -->
+    <div id="editModal" class="fixed inset-0 bg-black bg-opacity-60 hidden z-50 flex items-center justify-center transition-opacity">
+        <div class="bg-white p-6 rounded-xl w-[400px] shadow-2xl">
+            <h2 class="text-2xl font-bold mb-4 text-gray-800" id="modalTitle">Thông Tin Shop</h2>
+            <input type="hidden" id="editId">
+            <div class="mb-4">
+                <label class="block text-sm font-semibold mb-1 text-gray-700">Tên Shop</label>
+                <input type="text" id="editName" class="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="VD: Shop Áo Quần...">
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-semibold mb-1 text-gray-700">Tọa độ GPS (Vĩ độ, Kinh độ)</label>
+                <div class="flex space-x-2">
+                    <input type="text" id="editLat" class="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Vĩ độ (Lat)">
+                    <input type="text" id="editLng" class="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Kinh độ (Lng)">
+                </div>
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-semibold mb-1 text-gray-700">Ghi chú & Phân loại</label>
+                <textarea id="editNote" class="w-full p-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" rows="3" placeholder="Nhập ghi chú chi tiết..."></textarea>
+            </div>
+            <div class="flex justify-end space-x-3 mt-6">
+                <button id="btnCancel" class="px-5 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition-colors font-medium">Hủy</button>
+                <button id="btnSave" class="px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium">Lưu Thông Tin</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Khởi tạo dữ liệu mẫu từ các ảnh bạn đã gửi (để bạn dùng được ngay)
+        let shops = JSON.parse(localStorage.getItem('shops'));
+        if (!shops || shops.length === 0) {
+            shops = [
+                { id: 1, lat: 10.7940686, lng: 106.6992406, name: "Shop Bình Thạnh", note: "Mã đơn: 260923RBR6RH54\nPhường 15, Quận Bình Thạnh" },
+                { id: 2, lat: 10.7804694, lng: 106.6774113, name: "Shop Quận 3", note: "Mã đơn: 260923RC8HBHVR\nPhường 10, Quận 3" },
+                { id: 3, lat: 10.8430795, lng: 106.7372982, name: "Shop Thủ Đức", note: "Mã đơn: 260923RD4KQ59U\nPhường Hiệp Bình Chánh, Thủ Đức" },
+                { id: 4, lat: 10.7713192, lng: 106.6745984, name: "Shop Quận 10", note: "Mã đơn: 260923REW2W7V8\nPhường 11, Quận 10" }
+            ];
+            localStorage.setItem('shops', JSON.stringify(shops));
+        }
+
+        let map, markers = [];
+
+        function initMap() {
+            // Tâm bản đồ mặc định ở trung tâm các shop (HCM)
+            map = L.map('map', { doubleClickZoom: false }).setView([10.7940686, 106.6992406], 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+
+            // Thêm shop thủ công bằng double click
+            map.on('dblclick', function(e) {
+                openModal({ id: Date.now(), lat: e.latlng.lat.toFixed(7), lng: e.latlng.lng.toFixed(7), name: '', note: '' });
+            });
+
+            renderShops();
+        }
+
+        function renderShops(filterText = '') {
+            // Xóa markers cũ
+            markers.forEach(m => map.removeLayer(m));
+            markers = [];
+            const shopList = document.getElementById('shopList');
+            shopList.innerHTML = '';
+
+            shops.filter(s =>
+                (s.name || '').toLowerCase().includes(filterText.toLowerCase()) ||
+                (s.note || '').toLowerCase().includes(filterText.toLowerCase())
+            ).forEach(shop => {
+                // Thêm marker vào bản đồ
+                const marker = L.marker([shop.lat, shop.lng]).addTo(map);
+                const popupContent = `
+                    <div class="w-48">
+                        <div class="font-bold text-lg mb-1 text-blue-800">${shop.name || 'Chưa đặt tên'}</div>
+                        <div class="text-sm text-gray-700 mb-3 whitespace-pre-wrap">${shop.note || 'Không có ghi chú'}</div>
+                        <a href="https://www.google.com/maps/dir/?api=1&destination=${shop.lat},${shop.lng}" target="_blank" class="block w-full bg-green-600 hover:bg-green-700 text-white text-center py-2 rounded-lg text-sm font-semibold mb-2 transition-colors">📍 Chỉ đường GG Maps</a>
+                        <div class="flex space-x-2">
+                            <button onclick="editShop(${shop.id})" class="flex-1 bg-yellow-500 hover:bg-yellow-600 text-white text-center py-1.5 rounded-lg text-sm transition-colors">✏️ Sửa</button>
+                            <button onclick="deleteShop(${shop.id})" class="flex-1 bg-red-500 hover:bg-red-600 text-white text-center py-1.5 rounded-lg text-sm transition-colors">🗑️ Xóa</button>
+                        </div>
+                    </div>
+                `;
+                marker.bindPopup(popupContent);
+                markers.push(marker);
+
+                // Thêm vào danh sách cột trái
+                const item = document.createElement('div');
+                item.className = 'p-4 bg-white border border-gray-200 rounded-xl cursor-pointer hover:border-blue-500 hover:shadow-md transition-all';
+                item.innerHTML = `
+                    <div class="font-bold text-gray-800">${shop.name || 'Chưa đặt tên'}</div>
+                    <div class="text-xs text-gray-500 mt-1 flex items-center">
+                        <span class="mr-1">📍</span> ${shop.lat}, ${shop.lng}
+                    </div>
+                `;
+                item.onclick = () => {
+                    map.setView([shop.lat, shop.lng], 16);
+                    marker.openPopup();
+                };
+                shopList.appendChild(item);
+            });
+        }
+
+        // Xử lý AI đọc ảnh bằng Tesseract.js
+        document.getElementById('imageInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if(!file) return;
+
+            const aiStatus = document.getElementById('aiStatus');
+            aiStatus.classList.remove('hidden', 'text-red-600', 'text-green-600');
+            aiStatus.classList.add('text-blue-600');
+            aiStatus.innerText = '🤖 AI đang quét tọa độ từ ảnh...';
+
+            try {
+                // Nhận dạng văn bản
+                const result = await Tesseract.recognize(file, 'eng');
+                const text = result.data.text;
+                console.log("AI Extracted text:", text);
+
+                // Biểu thức chính quy tìm tọa độ (Vd: 10.7940686, 106.6992406)
+                const regex = /(1[0-2]\.\d{4,8})[^\d]+(10[5-7]\.\d{4,8})/;
+                const match = text.match(regex);
+
+                if(match) {
+                    const lat = parseFloat(match[1]);
+                    const lng = parseFloat(match[2]);
+                    aiStatus.classList.add('text-green-600');
+                    aiStatus.innerText = `✅ Đã tìm thấy: ${lat}, ${lng}`;
+                    setTimeout(() => aiStatus.classList.add('hidden'), 5000);
+
+                    // Tự động mở form lưu tọa độ mới
+                    openModal({ id: Date.now(), lat: lat, lng: lng, name: '', note: 'Ảnh phân tích từ AI' });
+                } else {
+                    aiStatus.classList.add('text-red-600');
+                    aiStatus.innerText = '❌ Không thấy tọa độ. Vui lòng thêm tay.';
+                    setTimeout(() => aiStatus.classList.add('hidden'), 5000);
+                    
+                    // Vẫn mở form để user tự điền nếu OCR trượt
+                    openModal({ id: Date.now(), lat: '', lng: '', name: '', note: '' });
+                }
+            } catch(err) {
+                console.error("Lỗi OCR:", err);
+                aiStatus.classList.add('text-red-600');
+                aiStatus.innerText = '❌ Lỗi phân tích ảnh.';
+                setTimeout(() => aiStatus.classList.add('hidden'), 5000);
+            }
+            
+            // Đặt lại input file
+            e.target.value = '';
+        });
+
+        // Tìm kiếm
+        document.getElementById('searchInput').addEventListener('input', (e) => {
+            renderShops(e.target.value);
+        });
+
+        // Logic Modal
+        const modal = document.getElementById('editModal');
+        function openModal(shop) {
+            document.getElementById('editId').value = shop.id || Date.now();
+            document.getElementById('editName').value = shop.name || '';
+            document.getElementById('editLat').value = shop.lat || '';
+            document.getElementById('editLng').value = shop.lng || '';
+            document.getElementById('editNote').value = shop.note || '';
+            modal.classList.remove('hidden');
+        }
+
+        function editShop(id) {
+            const shop = shops.find(s => s.id === id);
+            if(shop) openModal(shop);
+        }
+
+        function deleteShop(id) {
+            if(confirm('⚠️ Bạn có chắc muốn xóa shop này khỏi bản đồ?')) {
+                shops = shops.filter(s => s.id !== id);
+                saveData();
+                renderShops();
+            }
+        }
+
+        document.getElementById('btnCancel').onclick = () => {
+            modal.classList.add('hidden');
+        };
+
+        document.getElementById('btnSave').onclick = () => {
+            const id = parseInt(document.getElementById('editId').value);
+            const name = document.getElementById('editName').value;
+            const lat = parseFloat(document.getElementById('editLat').value);
+            const lng = parseFloat(document.getElementById('editLng').value);
+            const note = document.getElementById('editNote').value;
+
+            if(!lat || !lng || isNaN(lat) || isNaN(lng)) {
+                alert('❌ Vui lòng nhập tọa độ hợp lệ (chỉ chứa số)!');
+                return;
+            }
+
+            const existingIndex = shops.findIndex(s => s.id === id);
+            if(existingIndex >= 0) {
+                shops[existingIndex] = { id, name, lat, lng, note };
+            } else {
+                shops.push({ id, name, lat, lng, note });
+            }
+
+            saveData();
+            modal.classList.add('hidden');
+            renderShops();
+            map.setView([lat, lng], 15);
+        };
+
+        function saveData() {
+            localStorage.setItem('shops', JSON.stringify(shops));
+        }
+
+        // Khởi động
+        initMap();
+    </script>
+</body>
+</html>
